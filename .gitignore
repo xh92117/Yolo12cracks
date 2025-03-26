@@ -1,0 +1,63 @@
+# Python相关
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+.env
+.venv
+venv/
+ENV/
+.virtualenv
+.cursor
+
+# IDE相关
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 模型权重文件
+*.pt
+*.pth
+*.weights
+*.onnx
+*.engine
+
+# 运行时产生的文件
+runs/
+.DS_Store
+
+# 临时文件
+tmp/
+temp/
+logs/
+*.log
+
+# 数据集(通常数据集太大，不适合放在GitHub上)
+datasets/
+!datasets/*.yaml  # 保留数据集配置文件
+
+# 其他
+.ipynb_checkpoints/
+wandb/
+*.zip
+*.tar.gz
+*.rar 
