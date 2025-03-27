@@ -1,16 +1,66 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
+import math
+import random
 from copy import copy
 
+import numpy as np
+import torch
+import torch.nn as nn
+
+from ultralytics.data import build_dataloader, build_yolo_dataset
+from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
 from ultralytics.nn.tasks import SegmentationModel
-from ultralytics.utils import DEFAULT_CFG, RANK
-from ultralytics.utils.plotting import plot_images, plot_results
+from ultralytics.utils import LOGGER, RANK
+from ultralytics.utils.plotting import plot_images, plot_labels, plot_results
+from ultralytics.utils.torch_utils import de_parallel, torch_distributed_zero_first
 
+class Loss:
+    """YOLOv8 分割损失函数"""
+    
+    def __init__(self, model):
+        """
+        初始化损失函数
+        
+        Args:
+            model: 模型实例
+        """
+        self.model = model
+        self.box = nn.BCEWithLogitsLoss()
+        self.cls = nn.BCEWithLogitsLoss()
+        self.dfl = nn.BCEWithLogitsLoss()
+        self.seg = nn.BCEWithLogitsLoss()
+        
+    def __call__(self, preds, batch):
+        """
+        计算损失
+        
+        Args:
+            preds: 模型预测结果
+            batch: 批次数据
+            
+        Returns:
+            loss: 总损失
+            loss_items: 各项损失
+        """
+        loss = torch.zeros(1, device=preds[0].device)
+        loss_items = []
+        
+        # 计算各项损失
+        loss_box = self.box(preds[0], batch['targets'])
+        loss_cls = self.cls(preds[1], batch['labels'])
+        loss_dfl = self.dfl(preds[2], batch['dfl'])
+        loss_seg = self.seg(preds[3], batch['masks'])
+        
+        loss = loss_box + loss_cls + loss_dfl + loss_seg
+        loss_items = [loss_box.item(), loss_cls.item(), loss_dfl.item(), loss_seg.item()]
+        
+        return loss, loss_items
 
-class SegmentationTrainer(yolo.detect.DetectionTrainer):
+class SegmentationTrainer(BaseTrainer):
     """
-    A class extending the DetectionTrainer class for training based on a segmentation model.
+    A class extending the BaseTrainer class for training based on a segmentation model.
 
     Example:
         ```python
@@ -22,35 +72,97 @@ class SegmentationTrainer(yolo.detect.DetectionTrainer):
         ```
     """
 
-    def __init__(self, cfg=DEFAULT_CFG, overrides=None, _callbacks=None):
-        """Initialize a SegmentationTrainer object with given arguments."""
-        if overrides is None:
-            overrides = {}
-        overrides["task"] = "segment"
-        super().__init__(cfg, overrides, _callbacks)
+    def build_dataset(self, img_path, mode="train", batch=None):
+        """
+        Build YOLO Dataset.
+
+        Args:
+            img_path (str): Path to the folder containing images.
+            mode (str): `train` mode or `val` mode, users are able to customize different augmentations for each mode.
+            batch (int, optional): Size of batches, this is for `rect`. Defaults to None.
+        """
+        gs = max(int(de_parallel(self.model).stride.max() if self.model else 0), 32)
+        return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, rect=mode == "val", stride=gs)
+
+    def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):
+        """Construct and return dataloader."""
+        assert mode in {"train", "val"}, f"Mode must be 'train' or 'val', not {mode}."
+        with torch_distributed_zero_first(rank):  # init dataset *.cache only once if DDP
+            dataset = self.build_dataset(dataset_path, mode, batch_size)
+        shuffle = mode == "train"
+        if getattr(dataset, "rect", False) and shuffle:
+            LOGGER.warning("WARNING ⚠️ 'rect=True' is incompatible with DataLoader shuffle, setting shuffle=False")
+            shuffle = False
+        workers = self.args.workers if mode == "train" else self.args.workers * 2
+        return build_dataloader(dataset, batch_size, workers, shuffle, rank)  # return dataloader
+
+    def preprocess_batch(self, batch):
+        """Preprocesses a batch of images by scaling and converting to float."""
+        batch["img"] = batch["img"].to(self.device, non_blocking=True).float() / 255
+        if self.args.multi_scale:
+            imgs = batch["img"]
+            sz = (
+                random.randrange(int(self.args.imgsz * 0.5), int(self.args.imgsz * 1.5 + self.stride))
+                // self.stride
+                * self.stride
+            )  # size
+            sf = sz / max(imgs.shape[2:])  # scale factor
+            if sf != 1:
+                ns = [
+                    math.ceil(x * sf / self.stride) * self.stride for x in imgs.shape[2:]
+                ]  # new shape (stretched to gs-multiple)
+                imgs = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
+            batch["img"] = imgs
+        return batch
+
+    def set_model_attributes(self):
+        """Nl = de_parallel(self.model).model[-1].nl  # number of detection layers (to scale hyps)."""
+        self.model.nc = self.data["nc"]  # attach number of classes to model
+        self.model.names = self.data["names"]  # attach class names to model
+        self.model.args = self.args  # attach hyperparameters to model
 
     def get_model(self, cfg=None, weights=None, verbose=True):
-        """Return SegmentationModel initialized with specified config and weights."""
-        model = SegmentationModel(cfg, ch=3, nc=self.data["nc"], verbose=verbose and RANK == -1)
+        """Return a YOLO segmentation model."""
+        model = SegmentationModel(cfg, nc=self.data["nc"], verbose=verbose and RANK == -1)
         if weights:
             model.load(weights)
-
         return model
 
     def get_validator(self):
-        """Return an instance of SegmentationValidator for validation of YOLO model."""
-        self.loss_names = "box_loss", "seg_loss", "cls_loss", "dfl_loss"
+        """Returns a SegmentationValidator for YOLO model validation."""
+        self.loss_names = "box_loss", "cls_loss", "dfl_loss", "seg_loss"
         return yolo.segment.SegmentationValidator(
             self.test_loader, save_dir=self.save_dir, args=copy(self.args), _callbacks=self.callbacks
         )
 
+    def label_loss_items(self, loss_items=None, prefix="train"):
+        """
+        Returns a loss dict with labelled training loss items tensor.
+        """
+        keys = [f"{prefix}/{x}" for x in self.loss_names]
+        if loss_items is not None:
+            loss_items = [round(float(x), 5) for x in loss_items]  # convert tensors to 5 decimal place floats
+            return dict(zip(keys, loss_items))
+        else:
+            return keys
+
+    def progress_string(self):
+        """Returns a formatted string of training progress with epoch, GPU memory, loss, instances and size."""
+        return ("\n" + "%11s" * (4 + len(self.loss_names))) % (
+            "Epoch",
+            "GPU_mem",
+            *self.loss_names,
+            "Instances",
+            "Size",
+        )
+
     def plot_training_samples(self, batch, ni):
-        """Creates a plot of training sample images with labels and box coordinates."""
+        """Plots training samples with their annotations."""
         plot_images(
-            batch["img"],
-            batch["batch_idx"],
-            batch["cls"].squeeze(-1),
-            batch["bboxes"],
+            images=batch["img"],
+            batch_idx=batch["batch_idx"],
+            cls=batch["cls"].squeeze(-1),
+            bboxes=batch["bboxes"],
             masks=batch["masks"],
             paths=batch["im_file"],
             fname=self.save_dir / f"train_batch{ni}.jpg",
@@ -58,5 +170,18 @@ class SegmentationTrainer(yolo.detect.DetectionTrainer):
         )
 
     def plot_metrics(self):
-        """Plots training/val metrics."""
-        plot_results(file=self.csv, segment=True, on_plot=self.on_plot)  # save results.png
+        """Plots metrics from a CSV file."""
+        plot_results(file=self.csv, on_plot=self.on_plot)  # save results.png
+
+    def plot_training_labels(self):
+        """Create a labeled training plot of the YOLO model."""
+        boxes = np.concatenate([lb["bboxes"] for lb in self.train_loader.dataset.labels], 0)
+        cls = np.concatenate([lb["cls"] for lb in self.train_loader.dataset.labels], 0)
+        plot_labels(boxes, cls.squeeze(), names=self.data["names"], save_dir=self.save_dir, on_plot=self.on_plot)
+
+    def auto_batch(self):
+        """Get batch size by calculating memory occupation of model."""
+        train_dataset = self.build_dataset(self.trainset, mode="train", batch=16)
+        # 4 for mosaic augmentation
+        max_num_obj = max(len(label["cls"]) for label in train_dataset.labels) * 4
+        return super().auto_batch(max_num_obj)

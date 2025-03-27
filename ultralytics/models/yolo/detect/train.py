@@ -5,6 +5,7 @@ import random
 from copy import copy
 
 import numpy as np
+import torch
 import torch.nn as nn
 
 from ultralytics.data import build_dataloader, build_yolo_dataset
@@ -15,6 +16,45 @@ from ultralytics.utils import LOGGER, RANK
 from ultralytics.utils.plotting import plot_images, plot_labels, plot_results
 from ultralytics.utils.torch_utils import de_parallel, torch_distributed_zero_first
 
+class Loss:
+    """YOLOv8 检测损失函数"""
+    
+    def __init__(self, model):
+        """
+        初始化损失函数
+        
+        Args:
+            model: 模型实例
+        """
+        self.model = model
+        self.box = nn.BCEWithLogitsLoss()
+        self.cls = nn.BCEWithLogitsLoss()
+        self.dfl = nn.BCEWithLogitsLoss()
+        
+    def __call__(self, preds, batch):
+        """
+        计算损失
+        
+        Args:
+            preds: 模型预测结果
+            batch: 批次数据
+            
+        Returns:
+            loss: 总损失
+            loss_items: 各项损失
+        """
+        loss = torch.zeros(1, device=preds[0].device)
+        loss_items = []
+        
+        # 计算各项损失
+        loss_box = self.box(preds[0], batch['targets'])
+        loss_cls = self.cls(preds[1], batch['labels'])
+        loss_dfl = self.dfl(preds[2], batch['dfl'])
+        
+        loss = loss_box + loss_cls + loss_dfl
+        loss_items = [loss_box.item(), loss_cls.item(), loss_dfl.item()]
+        
+        return loss, loss_items
 
 class DetectionTrainer(BaseTrainer):
     """

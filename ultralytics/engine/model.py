@@ -8,23 +8,67 @@ import numpy as np
 import torch
 from PIL import Image
 
-from ultralytics.cfg import TASK2DATA, get_cfg, get_save_dir
-from ultralytics.engine.results import Results
-from ultralytics.hub import HUB_WEB_ROOT, HUBTrainingSession
 from ultralytics.nn.tasks import attempt_load_one_weight, guess_model_task, nn, yaml_model_load
+from ultralytics.engine.results import Results  # 直接导入Results类
 from ultralytics.utils import (
     ARGV,
     ASSETS,
     DEFAULT_CFG_DICT,
     LOGGER,
     RANK,
+    ROOT,
+    RUNS_DIR,
     SETTINGS,
+    TESTS_RUNNING,
     callbacks,
     checks,
     emojis,
     yaml_load,
 )
 
+# 直接定义TASK2DATA，避免从cfg导入
+TASK2DATA = {
+    "detect": "coco128.yaml",
+    "segment": "coco128-seg.yaml",
+    "classify": "imagenet100.yaml",
+    "pose": "coco128-pose.yaml",
+    "detect_cracks": "highway-cracks-6/data.yaml"
+}
+
+def get_save_dir(args, name=None):
+    """获取保存目录的路径"""
+    if isinstance(args, dict):
+        if "save_dir" in args:
+            save_dir = args["save_dir"]
+        else:
+            from ultralytics.utils.files import increment_path
+            project = args.get("project", "") or (ROOT.parent / "tests/tmp/runs" if TESTS_RUNNING else RUNS_DIR) / args.get("task", "")
+            name = name or args.get("name", "") or f"{args.get('mode', '')}"
+            save_dir = increment_path(Path(project) / name, exist_ok=args.get("exist_ok", False) if RANK in {-1, 0} else True)
+    else:
+        if getattr(args, "save_dir", None):
+            save_dir = args.save_dir
+        else:
+            from ultralytics.utils.files import increment_path
+            project = args.project or (ROOT.parent / "tests/tmp/runs" if TESTS_RUNNING else RUNS_DIR) / args.task
+            name = name or args.name or f"{args.mode}"
+            save_dir = increment_path(Path(project) / name, exist_ok=args.exist_ok if RANK in {-1, 0} else True)
+
+    return Path(save_dir)
+
+def get_cfg(cfg, overrides=None):
+    """加载配置"""
+    from ultralytics.cfg import get_cfg as _get_cfg
+    return _get_cfg(cfg, overrides)
+
+# 导入HUBTrainingSession和Results
+def _hub_ops():
+    from ultralytics.hub import HUB_WEB_ROOT, HUBTrainingSession
+    return HUB_WEB_ROOT, HUBTrainingSession
+
+def _get_engine_classes():
+    from ultralytics.engine.results import Results
+    return Results
 
 class Model(nn.Module):
     """
@@ -47,36 +91,6 @@ class Model(nn.Module):
         session (HUBTrainingSession): The Ultralytics HUB session, if applicable.
         task (str): The type of task the model is intended for.
         model_name (str): The name of the model.
-
-    Methods:
-        __call__: Alias for the predict method, enabling the model instance to be callable.
-        _new: Initializes a new model based on a configuration file.
-        _load: Loads a model from a checkpoint file.
-        _check_is_pytorch_model: Ensures that the model is a PyTorch model.
-        reset_weights: Resets the model's weights to their initial state.
-        load: Loads model weights from a specified file.
-        save: Saves the current state of the model to a file.
-        info: Logs or returns information about the model.
-        fuse: Fuses Conv2d and BatchNorm2d layers for optimized inference.
-        predict: Performs object detection predictions.
-        track: Performs object tracking.
-        val: Validates the model on a dataset.
-        benchmark: Benchmarks the model on various export formats.
-        export: Exports the model to different formats.
-        train: Trains the model on a dataset.
-        tune: Performs hyperparameter tuning.
-        _apply: Applies a function to the model's tensors.
-        add_callback: Adds a callback function for an event.
-        clear_callback: Clears all callbacks for an event.
-        reset_callbacks: Resets all callbacks to their default functions.
-
-    Examples:
-        >>> from ultralytics import YOLO
-        >>> model = YOLO("yolo11n.pt")
-        >>> results = model.predict("image.jpg")
-        >>> model.train(data="coco8.yaml", epochs=3)
-        >>> metrics = model.val()
-        >>> model.export(format="onnx")
     """
 
     def __init__(
@@ -122,12 +136,47 @@ class Model(nn.Module):
         self.metrics = None  # validation/training metrics
         self.session = None  # HUB session
         self.task = task  # task type
-        model = str(model).strip()
+        self.model_name = model
+
+        # 定义任务映射
+        self._task_map = {
+            'detect': {
+                'model': 'DetectionModel',
+                'trainer': 'DetectionTrainer',
+                'validator': 'DetectionValidator',
+                'predictor': 'DetectionPredictor'
+            },
+            'segment': {
+                'model': 'SegmentationModel',
+                'trainer': 'SegmentationTrainer',
+                'validator': 'SegmentationValidator',
+                'predictor': 'SegmentationPredictor'
+            },
+            'classify': {
+                'model': 'ClassificationModel',
+                'trainer': 'ClassificationTrainer',
+                'validator': 'ClassificationValidator',
+                'predictor': 'ClassificationPredictor'
+            },
+            'pose': {
+                'model': 'PoseModel',
+                'trainer': 'PoseTrainer',
+                'validator': 'PoseValidator',
+                'predictor': 'PosePredictor'
+            },
+            'detect_cracks': {
+                'model': 'CrackDetectionModel',
+                'trainer': 'DetectionTrainer',
+                'validator': 'DetectionValidator',
+                'predictor': 'DetectionPredictor'
+            }
+        }
 
         # Check if Ultralytics HUB model from https://hub.ultralytics.com
         if self.is_hub_model(model):
             # Fetch model from HUB
             checks.check_requirements("hub-sdk>=0.0.12")
+            _, HUBTrainingSession = _hub_ops()
             session = HUBTrainingSession.create_session(model)
             model = session.model_file
             if session.train_args:  # training sent from HUB
@@ -210,21 +259,22 @@ class Model(nn.Module):
         Check if the provided model is an Ultralytics HUB model.
 
         This static method determines whether the given model string represents a valid Ultralytics HUB model
-        identifier.
+        by checking if it contains specific URL patterns related to Ultralytics HUB.
 
         Args:
-            model (str): The model string to check.
+            model (str): The model string to be checked.
 
         Returns:
-            (bool): True if the model is a valid Ultralytics HUB model, False otherwise.
+            (bool): True if the model string represents an Ultralytics HUB model, False otherwise.
 
         Examples:
-            >>> Model.is_hub_model("https://hub.ultralytics.com/models/MODEL")
+            >>> Model.is_hub_model("https://hub.ultralytics.com/models/example_model")
             True
             >>> Model.is_hub_model("yolo11n.pt")
             False
         """
-        return model.startswith(f"{HUB_WEB_ROOT}/models/")
+        HUB_WEB_ROOT, _ = _hub_ops()
+        return any(x in str(model) for x in (f"{HUB_WEB_ROOT}/models/", "https://hub.ultralytics.com/models/"))
 
     def _new(self, cfg: str, task=None, model=None, verbose=False) -> None:
         """
@@ -500,62 +550,57 @@ class Model(nn.Module):
         self,
         source: Union[str, Path, int, Image.Image, list, tuple, np.ndarray, torch.Tensor] = None,
         stream: bool = False,
-        predictor=None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[Results]:
         """
-        Performs predictions on the given image source using the YOLO model.
+        Performs prediction using the YOLO model.
 
-        This method facilitates the prediction process, allowing various configurations through keyword arguments.
-        It supports predictions with custom predictors or the default predictor method. The method handles different
-        types of image sources and can operate in a streaming mode.
+        This method is used for inference on various types of inputs, such as images, videos, or streams.
+        It configures and runs the prediction process with the provided arguments.
 
         Args:
-            source (str | Path | int | PIL.Image | np.ndarray | torch.Tensor | List | Tuple): The source
-                of the image(s) to make predictions on. Accepts various types including file paths, URLs, PIL
-                images, numpy arrays, and torch tensors.
-            stream (bool): If True, treats the input source as a continuous stream for predictions.
-            predictor (BasePredictor | None): An instance of a custom predictor class for making predictions.
-                If None, the method uses a default predictor.
-            **kwargs: Additional keyword arguments for configuring the prediction process.
+            source (str | Path | int | PIL.Image | np.ndarray | torch.Tensor | List | Tuple, optional): The
+                source of the image to make predictions on. Accepts various formats, including file paths,
+                URLs, PIL images, numpy arrays, and PyTorch tensors.
+            stream (bool, optional): Whether to treat the input as a continuous stream. Defaults to False.
+            **kwargs (Any): Additional keyword arguments for the prediction process, such as confidence thresholds,
+                device selection, or visualization options.
 
         Returns:
             (List[ultralytics.engine.results.Results]): A list of prediction results, each encapsulated in a
                 Results object.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
-            >>> results = model.predict(source="path/to/image.jpg", conf=0.25)
-            >>> for r in results:
-            ...     print(r.boxes.data)  # print detection bounding boxes
+            Predict with default settings:
+            >>> results = model.predict('https://ultralytics.com/images/bus.jpg')
 
-        Notes:
-            - If 'source' is not provided, it defaults to the ASSETS constant with a warning.
-            - The method sets up a new predictor if not already present and updates its arguments with each call.
-            - For SAM-type models, 'prompts' can be passed as a keyword argument.
+            Predict with custom confidence threshold and device:
+            >>> results = model.predict(img, conf=0.5, device='cpu')
+
+            Predict with custom image size:
+            >>> results = model.predict(img, imgsz=320)
+
+            Predict and save results with visualization:
+            >>> results = model.predict(img, save=True, save_txt=True, save_conf=True)
+
+            Stream prediction on a video:
+            >>> for results in model.predict('video.mp4', stream=True):
+            ...     for result in results:
+            ...         boxes = result.boxes  # Get prediction boxes
+            ...         print(f"Detected {len(boxes)} objects in frame")
         """
-        if source is None:
-            source = ASSETS
-            LOGGER.warning(f"WARNING ⚠️ 'source' is missing. Using 'source={source}'.")
+        if isinstance(source, (list, tuple)) and len(source) > 0 and all(isinstance(x, Results) for x in source):
+            LOGGER.warning("WARNING ⚠️ Source is already a Results object, semantic segmentation may be better applied "
+                           "to the original source. For segmentation of detection results use 'segment(model, source)' "
+                           "from the Checks module instead, i.e. 'from ultralytics.checks import segment'")
 
-        is_cli = (ARGV[0].endswith("yolo") or ARGV[0].endswith("ultralytics")) and any(
-            x in ARGV for x in ("predict", "track", "mode=predict", "mode=track")
-        )
-
-        custom = {"conf": 0.25, "batch": 1, "save": is_cli, "mode": "predict"}  # method defaults
-        args = {**self.overrides, **custom, **kwargs}  # highest priority args on the right
-        prompts = args.pop("prompts", None)  # for SAM-type models
-
-        if not self.predictor:
-            self.predictor = (predictor or self._smart_load("predictor"))(overrides=args, _callbacks=self.callbacks)
-            self.predictor.setup_model(model=self.model, verbose=is_cli)
+        if self.predictor is None:
+            self.predictor = self._smart_load("predictor")(overrides=dict(task=self.task), _callbacks=self.callbacks)
+            self.predictor.setup_model(model=self.model, verbose=False)
         else:  # only update args if predictor is already setup
-            self.predictor.args = get_cfg(self.predictor.args, args)
-            if "project" in args or "name" in args:
-                self.predictor.save_dir = get_save_dir(self.predictor.args)
-        if prompts and hasattr(self.predictor, "set_prompts"):  # for SAM-type models
-            self.predictor.set_prompts(prompts)
-        return self.predictor.predict_cli(source=source) if is_cli else self.predictor(source=source, stream=stream)
+            self.predictor.args = get_cfg(self.predictor.args, {"task": self.task, **kwargs})
+        return self.predictor.predict_cli(source=source, stream=stream) if getattr(self.predictor.args, "cli", False) else \
+            self.predictor(source=source, stream=stream)
 
     def track(
         self,
@@ -737,80 +782,76 @@ class Model(nn.Module):
         args = {**self.overrides, **custom, **kwargs, "mode": "export"}  # highest priority args on the right
         return Exporter(overrides=args, _callbacks=self.callbacks)(model=self.model)
 
-    def train(
-        self,
-        trainer=None,
-        **kwargs: Any,
-    ):
+    def train(self, **kwargs):
         """
-        Trains the model using the specified dataset and training configuration.
+        Trains the YOLO model on a given dataset.
 
-        This method facilitates model training with a range of customizable settings. It supports training with a
-        custom trainer or the default training approach. The method handles scenarios such as resuming training
-        from a checkpoint, integrating with Ultralytics HUB, and updating model and configuration after training.
-
-        When using Ultralytics HUB, if the session has a loaded model, the method prioritizes HUB training
-        arguments and warns if local arguments are provided. It checks for pip updates and combines default
-        configurations, method-specific defaults, and user-provided arguments to configure the training process.
+        This method configures the training process based on the provided keyword arguments and initiates the
+        training using a Trainer object. After training, it updates the model's metrics and returns them.
 
         Args:
-            trainer (BaseTrainer | None): Custom trainer instance for model training. If None, uses default.
-            **kwargs: Arbitrary keyword arguments for training configuration. Common options include:
-                data (str): Path to dataset configuration file.
+            **kwargs (Any): Keyword arguments for the training process. Common parameters include:
+                data (str): Path to the dataset.
                 epochs (int): Number of training epochs.
-                batch_size (int): Batch size for training.
+                batch (int): Batch size.
                 imgsz (int): Input image size.
-                device (str): Device to run training on (e.g., 'cuda', 'cpu').
+                device (str): Training device (e.g. 'cpu', '0', '0,1,2,3').
                 workers (int): Number of worker threads for data loading.
-                optimizer (str): Optimizer to use for training.
                 lr0 (float): Initial learning rate.
-                patience (int): Epochs to wait for no observable improvement for early stopping of training.
+                resume (bool): Resume training from the last checkpoint.
 
         Returns:
-            (Dict | None): Training metrics if available and training is successful; otherwise, None.
-
-        Raises:
-            AssertionError: If the model is not a PyTorch model.
-            PermissionError: If there is a permission issue with the HUB session.
-            ModuleNotFoundError: If the HUB SDK is not installed.
+            (Dict[str, Any]): A dictionary containing training metrics, if available and the process is not distributed.
 
         Examples:
             >>> model = YOLO("yolo11n.pt")
             >>> results = model.train(data="coco8.yaml", epochs=3)
+
+        Notes:
+            - If no 'data' argument is provided, it defaults to a task-specific dataset.
+            - Training parameters are merged from default configurations, model overrides, and provided keyword args.
+            - For distributed training (DDP), metrics will be None unless the process rank is 0.
         """
-        self._check_is_pytorch_model()
-        if hasattr(self.session, "model") and self.session.model.id:  # Ultralytics HUB session with loaded model
-            if any(kwargs):
-                LOGGER.warning("WARNING ⚠️ using HUB training arguments, ignoring local training arguments.")
-            kwargs = self.session.train_args  # overwrite kwargs
+        self.predictor = None  # reset predictor
+        overrides = {"data": TASK2DATA.get(self.task, "")}
+        if not overrides["data"]:  # if data is none
+            raise ValueError("dataset not found")
+        overrides.update(kwargs)
+        
+        # 设置保存目录
+        if kwargs.get("project") or kwargs.get("name"):
+            from types import SimpleNamespace
+            args_ns = SimpleNamespace(
+                project=kwargs.get("project", ""),
+                name=kwargs.get("name", ""),
+                task=self.task,
+                mode="train",
+                exist_ok=kwargs.get("exist_ok", False)
+            )
+            overrides["save_dir"] = get_save_dir(args_ns)
+            
+        overrides.update(model=self.model if isinstance(self.model, (str, Path)) else None)
 
-        checks.check_pip_update_available()
+        # Check resume
+        self.trainer = self._smart_load("trainer")(overrides=overrides, _callbacks=self.callbacks)
+        if kwargs.get("resume"):
+            self.trainer.resume_training()
 
-        overrides = yaml_load(checks.check_yaml(kwargs["cfg"])) if kwargs.get("cfg") else self.overrides
-        custom = {
-            # NOTE: handle the case when 'cfg' includes 'data'.
-            "data": overrides.get("data") or DEFAULT_CFG_DICT["data"] or TASK2DATA[self.task],
-            "model": self.overrides["model"],
-            "task": self.task,
-        }  # method defaults
-        args = {**overrides, **custom, **kwargs, "mode": "train"}  # highest priority args on the right
-        if args.get("resume"):
-            args["resume"] = self.ckpt_path
-
-        self.trainer = (trainer or self._smart_load("trainer"))(overrides=args, _callbacks=self.callbacks)
-        if not args.get("resume"):  # manually set model only if not resuming
-            self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
-            self.model = self.trainer.model
-
-        self.trainer.hub_session = self.session  # attach optional HUB session
-        self.trainer.train()
-        # Update model and cfg after training
+        self.trainer.add_callback("on_train_end", self._on_train_end)
         if RANK in {-1, 0}:
-            ckpt = self.trainer.best if self.trainer.best.exists() else self.trainer.last
-            self.model, self.ckpt = attempt_load_one_weight(ckpt)
-            self.overrides = self.model.args
-            self.metrics = getattr(self.trainer.validator, "metrics", None)  # TODO: no metrics returned by DDP
-        return self.metrics
+            self.trainer.train()
+            self.metrics = getattr(self.trainer, "metrics", None)  # training metrics
+            LOGGER.info(
+                f"Training completed successfully ✅\n"
+                f"Results saved to {colorstr('bold', self.trainer.save_dir)}\n"
+                f"Predict:         yolo predict task={self.task} model={self.trainer.best} imgsz={self.trainer.args.imgsz}\n"
+                f"Validate:        yolo val task={self.task} model={self.trainer.best} imgsz={self.trainer.args.imgsz}\n"
+                f"Export:          yolo export model={self.trainer.best} imgsz={self.trainer.args.imgsz}\n"
+                f"Docs:            https://docs.ultralytics.com/modes/train/\n"
+            )
+            return self.metrics
+        else:
+            return None
 
     def tune(
         self,
@@ -1092,7 +1133,29 @@ class Model(nn.Module):
             - The task_map attribute should be properly initialized with the correct mappings for each task.
         """
         try:
-            return self.task_map[self.task][key]
+            # 获取类名
+            class_name = self._task_map[self.task][key]
+            
+            # 根据任务类型和类名导入相应的模块
+            if self.task == 'detect_cracks':
+                if key == 'model':
+                    from ultralytics.models.yolo.detect_cracks.model import CrackDetectionModel
+                    return CrackDetectionModel
+                elif key == 'trainer':
+                    from ultralytics.models.yolo.detect.train import DetectionTrainer
+                    return DetectionTrainer
+                elif key == 'validator':
+                    from ultralytics.models.yolo.detect.val import DetectionValidator
+                    return DetectionValidator
+                elif key == 'predictor':
+                    from ultralytics.models.yolo.detect.predict import DetectionPredictor
+                    return DetectionPredictor
+            else:
+                # 对于其他任务，从相应的模块导入类
+                module_path = f"ultralytics.models.yolo.{self.task}"
+                module = __import__(module_path, fromlist=[class_name])
+                return getattr(module, class_name)
+                
         except Exception as e:
             name = self.__class__.__name__
             mode = inspect.stack()[1][3]  # get the function name.
@@ -1129,7 +1192,7 @@ class Model(nn.Module):
             classes supported by the Ultralytics framework. The docstring provides a general
             description of the expected behavior and structure.
         """
-        raise NotImplementedError("Please provide task map for your model!")
+        return self._task_map
 
     def eval(self):
         """
@@ -1171,3 +1234,17 @@ class Model(nn.Module):
             >>> print(model.task)
         """
         return self._modules["model"] if name == "model" else getattr(self.model, name)
+
+    def _on_train_end(self, trainer):
+        """
+        回调函数，在训练结束时调用
+        
+        Args:
+            trainer: 训练器对象
+        """
+        # 更新模型和配置
+        if RANK in {-1, 0}:
+            ckpt = trainer.best if trainer.best.exists() else trainer.last
+            self.model, self.ckpt = attempt_load_one_weight(ckpt)
+            self.overrides = self.model.args
+            self.metrics = getattr(trainer.validator, "metrics", None)

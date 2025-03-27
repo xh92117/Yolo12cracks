@@ -1,4 +1,4 @@
-# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+﻿# Ultralytics 馃殌 AGPL-3.0 License - https://ultralytics.com/license
 
 import shutil
 import subprocess
@@ -48,13 +48,14 @@ SOLUTION_MAP = {
 
 # Define valid tasks and modes
 MODES = {"train", "val", "predict", "export", "track", "benchmark"}
-TASKS = {"detect", "segment", "classify", "pose", "obb"}
+TASKS = {"detect", "segment", "classify", "pose", "obb", "detect_cracks"}
 TASK2DATA = {
-    "detect": "coco8.yaml",
-    "segment": "coco8-seg.yaml",
-    "classify": "imagenet10",
-    "pose": "coco8-pose.yaml",
+    "detect": "coco128.yaml",
+    "segment": "coco128-seg.yaml",
+    "classify": "imagenet100.yaml",
+    "pose": "coco128-pose.yaml",
     "obb": "dota8.yaml",
+    "detect_cracks": "highway-cracks-6/data.yaml",
 }
 TASK2MODEL = {
     "detect": "yolo11n.pt",
@@ -62,6 +63,7 @@ TASK2MODEL = {
     "classify": "yolo11n-cls.pt",
     "pose": "yolo11n-pose.pt",
     "obb": "yolo11n-obb.pt",
+    "detect_cracks": "yolo11n.pt",
 }
 TASK2METRIC = {
     "detect": "metrics/mAP50-95(B)",
@@ -69,6 +71,7 @@ TASK2METRIC = {
     "classify": "metrics/accuracy_top1",
     "pose": "metrics/mAP50-95(P)",
     "obb": "metrics/mAP50-95(B)",
+    "detect_cracks": "metrics/mAP50-95(B)",
 }
 MODELS = {TASK2MODEL[task] for task in TASKS}
 
@@ -304,7 +307,7 @@ def get_cfg(cfg: Union[str, Path, Dict, SimpleNamespace] = DEFAULT_CFG_DICT, ove
             cfg[k] = str(cfg[k])
     if cfg.get("name") == "model":  # assign model to 'name' arg
         cfg["name"] = str(cfg.get("model", "")).split(".")[0]
-        LOGGER.warning(f"WARNING ⚠️ 'name=model' automatically updated to 'name={cfg['name']}'.")
+        LOGGER.warning(f"WARNING 鈿狅笍 'name=model' automatically updated to 'name={cfg['name']}'.")
 
     # Type and Value checks
     check_cfg(cfg)
@@ -612,9 +615,9 @@ def handle_yolo_settings(args: List[str]) -> None:
                 SETTINGS.update(new)
 
         print(SETTINGS)  # print the current settings
-        LOGGER.info(f"💡 Learn more about Ultralytics Settings at {url}")
+        LOGGER.info(f"馃挕 Learn more about Ultralytics Settings at {url}")
     except Exception as e:
-        LOGGER.warning(f"WARNING ⚠️ settings error: '{e}'. Please see {url} for help.")
+        LOGGER.warning(f"WARNING 鈿狅笍 settings error: '{e}'. Please see {url} for help.")
 
 
 def handle_yolo_solutions(args: List[str]) -> None:
@@ -676,7 +679,7 @@ def handle_yolo_solutions(args: List[str]) -> None:
             LOGGER.info(SOLUTIONS_HELP_MSG)
     else:
         LOGGER.warning(
-            f"⚠️ No valid solution provided. Using default 'count'. Available: {', '.join(SOLUTION_MAP.keys())}"
+            f"鈿狅笍 No valid solution provided. Using default 'count'. Available: {', '.join(SOLUTION_MAP.keys())}"
         )
         s_n = "count"  # Default solution if none provided
 
@@ -685,7 +688,7 @@ def handle_yolo_solutions(args: List[str]) -> None:
 
     if s_n == "inference":
         checks.check_requirements("streamlit>=1.29.0")
-        LOGGER.info("💡 Loading Ultralytics live inference app...")
+        LOGGER.info("馃挕 Loading Ultralytics live inference app...")
         subprocess.run(
             [  # Run subprocess with Streamlit custom argument
                 "streamlit",
@@ -866,10 +869,10 @@ def entrypoint(debug=""):
     overrides = {}  # basic overrides, i.e. imgsz=320
     for a in merge_equals_args(args):  # merge spaces around '=' sign
         if a.startswith("--"):
-            LOGGER.warning(f"WARNING ⚠️ argument '{a}' does not require leading dashes '--', updating to '{a[2:]}'.")
+            LOGGER.warning(f"WARNING 鈿狅笍 argument '{a}' does not require leading dashes '--', updating to '{a[2:]}'.")
             a = a[2:]
         if a.endswith(","):
-            LOGGER.warning(f"WARNING ⚠️ argument '{a}' does not require trailing comma ',', updating to '{a[:-1]}'.")
+            LOGGER.warning(f"WARNING 鈿狅笍 argument '{a}' does not require trailing comma ',', updating to '{a[:-1]}'.")
             a = a[:-1]
         if "=" in a:
             try:
@@ -906,7 +909,7 @@ def entrypoint(debug=""):
     mode = overrides.get("mode")
     if mode is None:
         mode = DEFAULT_CFG.mode or "predict"
-        LOGGER.warning(f"WARNING ⚠️ 'mode' argument is missing. Valid modes are {MODES}. Using default 'mode={mode}'.")
+        LOGGER.warning(f"WARNING 鈿狅笍 'mode' argument is missing. Valid modes are {MODES}. Using default 'mode={mode}'.")
     elif mode not in MODES:
         raise ValueError(f"Invalid 'mode={mode}'. Valid modes are {MODES}.\n{CLI_HELP_MSG}")
 
@@ -915,13 +918,13 @@ def entrypoint(debug=""):
     if task:
         if task == "classify" and mode == "track":
             raise ValueError(
-                f"❌ Classification doesn't support 'mode=track'. Valid modes for classification are"
+                f"鉂?Classification doesn't support 'mode=track'. Valid modes for classification are"
                 f" {MODES - {'track'}}.\n{CLI_HELP_MSG}"
             )
         elif task not in TASKS:
             if task == "track":
                 LOGGER.warning(
-                    "WARNING ⚠️ invalid 'task=track', setting 'task=detect' and 'mode=track'. Valid tasks are {TASKS}.\n{CLI_HELP_MSG}."
+                    "WARNING 鈿狅笍 invalid 'task=track', setting 'task=detect' and 'mode=track'. Valid tasks are {TASKS}.\n{CLI_HELP_MSG}."
                 )
                 task, mode = "detect", "track"
             else:
@@ -933,7 +936,7 @@ def entrypoint(debug=""):
     model = overrides.pop("model", DEFAULT_CFG.model)
     if model is None:
         model = "yolo11n.pt"
-        LOGGER.warning(f"WARNING ⚠️ 'model' argument is missing. Using default 'model={model}'.")
+        LOGGER.warning(f"WARNING 鈿狅笍 'model' argument is missing. Using default 'model={model}'.")
     overrides["model"] = model
     stem = Path(model).stem.lower()
     if "rtdetr" in stem:  # guess architecture
@@ -959,7 +962,7 @@ def entrypoint(debug=""):
     if task != model.task:
         if task:
             LOGGER.warning(
-                f"WARNING ⚠️ conflicting 'task={task}' passed with 'task={model.task}' model. "
+                f"WARNING 鈿狅笍 conflicting 'task={task}' passed with 'task={model.task}' model. "
                 f"Ignoring 'task={task}' and updating to 'task={model.task}' to match model."
             )
         task = model.task
@@ -969,21 +972,21 @@ def entrypoint(debug=""):
         overrides["source"] = (
             "https://ultralytics.com/images/boats.jpg" if task == "obb" else DEFAULT_CFG.source or ASSETS
         )
-        LOGGER.warning(f"WARNING ⚠️ 'source' argument is missing. Using default 'source={overrides['source']}'.")
+        LOGGER.warning(f"WARNING 鈿狅笍 'source' argument is missing. Using default 'source={overrides['source']}'.")
     elif mode in {"train", "val"}:
         if "data" not in overrides and "resume" not in overrides:
             overrides["data"] = DEFAULT_CFG.data or TASK2DATA.get(task or DEFAULT_CFG.task, DEFAULT_CFG.data)
-            LOGGER.warning(f"WARNING ⚠️ 'data' argument is missing. Using default 'data={overrides['data']}'.")
+            LOGGER.warning(f"WARNING 鈿狅笍 'data' argument is missing. Using default 'data={overrides['data']}'.")
     elif mode == "export":
         if "format" not in overrides:
             overrides["format"] = DEFAULT_CFG.format or "torchscript"
-            LOGGER.warning(f"WARNING ⚠️ 'format' argument is missing. Using default 'format={overrides['format']}'.")
+            LOGGER.warning(f"WARNING 鈿狅笍 'format' argument is missing. Using default 'format={overrides['format']}'.")
 
     # Run command in python
     getattr(model, mode)(**overrides)  # default args from model
 
     # Show help
-    LOGGER.info(f"💡 Learn more at https://docs.ultralytics.com/modes/{mode}")
+    LOGGER.info(f"馃挕 Learn more at https://docs.ultralytics.com/modes/{mode}")
 
     # Recommend VS Code extension
     if IS_VSCODE and SETTINGS.get("vscode_msg", True):

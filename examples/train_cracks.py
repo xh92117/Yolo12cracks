@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
 """
@@ -9,19 +12,23 @@ import os
 import sys
 import argparse
 from pathlib import Path
-
-import torch
 import yaml
-import cv2
+import random
 import numpy as np
 
-# 添加项目路径到系统路径
-FILE = Path(__file__).resolve()
-ROOT = FILE.parents[1]  # YOLOv12项目根目录
-if str(ROOT) not in sys.path:
-    sys.path.append(str(ROOT))  # 添加ROOT到PATH
+# 添加项目根目录到PYTHONPATH
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from ultralytics import YOLO
+# 标准依赖项
+import torch
+from tqdm import tqdm
+
+# 延迟导入YOLO类避免循环导入
+def import_yolo():
+    from ultralytics import YOLO
+    return YOLO
+
+# 自定义依赖项
 from ultralytics.nn.modules.attentions.config import set_config
 from ultralytics.utils.files import increment_path
 
@@ -116,7 +123,8 @@ def create_data_yaml(args):
                 0: 'crack'                # 裂缝类别
             },
             
-            'nc': 1                        # 类别数
+            'nc': 1,                      # 类别数
+            'task': 'detect_cracks'       # 任务类型：裂缝检测
         }
         
         # 写入YAML文件
@@ -150,11 +158,17 @@ def train(args):
     save_dir = increment_path(Path(args.project) / args.name, exist_ok=args.exist_ok)
     save_dir.mkdir(parents=True, exist_ok=True)
     
+    # 读取数据配置文件获取任务类型（使用obb任务替代detect_cracks）
+    with open(args.data, 'r') as f:
+        data_dict = yaml.safe_load(f)
+    # 使用obb任务，因为它已经在TASK2MODEL和TASK2METRIC中定义
+    task = 'obb'
+    
     # 初始化模型
     if args.weights:
-        model = YOLO(args.weights)
+        model = import_yolo()(args.weights, task=task)
     else:
-        model = YOLO(args.cfg)
+        model = import_yolo()(args.cfg, task=task)
     
     # 训练模型
     results = model.train(
@@ -215,7 +229,7 @@ def main(args):
     # 验证模型
     if Path(save_dir / 'weights' / 'best.pt').exists():
         print("\n开始验证最佳模型...")
-        best_model = YOLO(str(save_dir / 'weights' / 'best.pt'))
+        best_model = import_yolo()(str(save_dir / 'weights' / 'best.pt'))
         best_model.val(data=args.data)
     
 
